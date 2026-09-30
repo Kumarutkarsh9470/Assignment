@@ -1,0 +1,107 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>DA331 Assignment 5 Report</title>
+<style>
+@page { size: A4; margin: 14mm 15mm; }
+body { font-family: "DejaVu Serif", Georgia, serif; font-size: 10.2pt; line-height: 1.32; color: #111; }
+h1 { font-size: 15pt; text-align: center; margin: 0 0 2px; }
+.sub { text-align: center; font-size: 10pt; margin-bottom: 8px; }
+h2 { font-size: 11.5pt; margin: 9px 0 3px; border-bottom: 1px solid #999; padding-bottom: 1px; }
+p { margin: 3px 0; text-align: justify; }
+ul { margin: 2px 0 2px 18px; padding: 0; } li { margin: 1px 0; }
+table { border-collapse: collapse; margin: 4px auto; font-size: 9.2pt; }
+th, td { border: 1px solid #888; padding: 2px 7px; text-align: center; } th { background: #eee; }
+td:first-child { text-align: left; }
+.figs { display: flex; gap: 8px; margin: 5px 0; } .figs img { width: 50%; }
+.cap { font-size: 8.6pt; text-align: center; color: #333; margin-top: -2px; }
+code { font-size: 9pt; }
+</style></head><body>
+<h1>Assignment 5: CASAS Smart-Home Activity Dataset</h1>
+<div class="sub">DA331 Big Data Analytics: Tools &amp; Techniques<br>
+<b>Kumar Utkarsh</b> &nbsp;|&nbsp; Roll No. <b>240150016</b></div>
+
+<h2>1. Dataset and tools</h2>
+<p>I used the Kaggle mirror of the CASAS Smart Home dataset (Zenodo 15708568), home <b>hh101</b>, which is
+a single resident with six room-level ambient sensors (PIR motion <code>ON/OFF</code> and door
+<code>OPEN/CLOSE</code>). It contains two files:</p>
+<ul>
+<li>a <b>raw stream</b> of 1,286,244 unlabelled events (2012-07-18 to 2013-07-25);</li>
+<li>a <b>labelled subset</b> of 222,858 events (2012-07-20 to 2012-09-17), where activities are marked
+as <code>Activity="begin"</code> … <code>Activity="end"</code>.</li>
+</ul>
+<p>The work was done in Jupyter/Kaggle notebooks with <b>pandas</b> (vectorised parsing, categorical dtypes:
+the one-year stream takes 13 MB in memory), <b>matplotlib/seaborn</b> for visualisation and
+<b>scikit-learn</b> for modelling. The begin/end annotations were expanded to one label per event
+(events outside any segment are labelled <i>Other</i>). Each annotated segment was then collapsed into an
+<b>activity episode</b>, giving 2,677 episodes over 34 activity labels.</p>
+
+<h2>2. Exploratory data analysis (Task 1, <code>01_EDA_CASAS.ipynb</code>)</h2>
+<ul>
+<li><b>Quality:</b> there are no missing values and no duplicate rows. The labelled file has one out-of-order
+timestamp, which was fixed by sorting. The only outage is a two-day gap in July 2013. The home averages
+about 3,500 events per day.</li>
+<li><b>Sensors:</b> motion events make up 99.4% of the data. The living room (33%), bedroom (23%) and kitchen
+(22%) dominate, and a typical motion trigger lasts 1–2 s. Inter-event times are heavy-tailed
+(median 1.2 s, 99th percentile 341 s), so the stream is bursty.</li>
+<li><b>Circadian rhythm:</b> activity peaks at 09–12h, and only 8.6% of events occur between 00:00 and 06:00.
+Kitchen activity peaks at 08–10h, and weekends have about 10% more events than weekdays.</li>
+<li><b>Activities:</b> 27.9% of labelled-file events are <i>Other</i>. The labels are highly imbalanced:
+five activities (Toilet, Watch_TV, Sleep_Out_Of_Bed, Personal_Hygiene, Dress) make up 46% of episodes, and
+nine labels have fewer than 20 episodes. Durations range from seconds (Wake_Up) to about 5 h (Sleep).
+Each activity has a distinct time and room signature, e.g. Morning_Meds at 06–08h, Cook/Eat_Dinner at
+17–19h and Bed_Toilet_Transition at 02–05h.</li>
+<li><b>Transitions:</b> many transitions are almost deterministic (Go_To_Sleep→Sleep 1.00, Leave_Home→Enter_Home
+0.99, Bathe→Dress 0.95). The entropy of the next activity falls from 4.42 bits to 2.64 bits given the
+current activity, and to 2.02 / 1.79 bits when the time of day / the previous activity is also known.
+This directly motivates the model design.</li>
+</ul>
+<div class="figs"><img src="../figures/eda_activity_hour.png"><img src="../figures/eda_transitions.png"></div>
+<div class="cap">Figure 1. Start-hour profile of each activity (left) and activity transition matrix (right).</div>
+
+<h2>3. Next-activity temporal model (Task 2, <code>02_Next_Activity_Model.ipynb</code>)</h2>
+<p><b>Formulation.</b> When episode <i>t</i> ends, predict the activity of episode <i>t+1</i>. Nine labels
+with fewer than 20 episodes are merged into a <i>Rare</i> class, which leaves 26 classes. For each episode
+the features are:</p>
+<ul>
+<li>the current activity and the three previous activities (lags);</li>
+<li>the end time as cyclic <code>sin/cos(hour)</code>, plus day of week and a weekend flag;</li>
+<li>log duration and log event count of the current episode;</li>
+<li>the last sensor (room) that fired;</li>
+<li>the idle time since the previous episode.</li>
+</ul>
+<p>All features are available at prediction time. The data is split <b>chronologically</b>: 70% train
+(Jul 20–Sep 1), 15% validation (Sep 1–9) and 15% test (Sep 9–17, 402 transitions).</p>
+<p><b>Models.</b></p>
+<ul>
+<li><b>Baselines:</b> majority class, and Markov chains P(next | current), P(next | previous, current) and
+the time-aware P(next | current, 3-hour bin), each with add-α smoothing and back-off.</li>
+<li><b>Main model:</b> <b>HistGradientBoostingClassifier</b> with native categorical features. Three
+configurations were compared on validation, and the best was refit on train+validation.</li>
+</ul>
+<table>
+<tr><th>Model (test period)</th><th>Accuracy</th><th>Macro-F1</th><th>Top-3 acc.</th></tr>
+<tr><td>Majority class</td><td>0.102</td><td>0.007</td><td>0.259</td></tr>
+<tr><td>Markov-1: P(next | cur)</td><td>0.343</td><td>0.263</td><td>0.609</td></tr>
+<tr><td>Markov-2: P(next | prev, cur)</td><td>0.415</td><td>0.400</td><td>0.644</td></tr>
+<tr><td>Time-aware Markov: P(next | cur, 3h bin)</td><td>0.428</td><td>0.385</td><td>0.659</td></tr>
+<tr><td><b>Gradient boosting (temporal features)</b></td><td><b>0.460</b></td><td><b>0.465</b></td><td><b>0.692</b></td></tr>
+</table>
+<p><b>Analysis.</b> Each source of temporal information improves on the one before: sequence history
+(Markov-2), time of day (time-aware Markov), and their combination with episode context (gradient
+boosting). Gradient boosting raises accuracy from 0.34 to 0.46 and macro-F1 from 0.26 to 0.47 over the
+first-order chain.</p>
+<ul>
+<li><b>Feature importance:</b> by permutation importance, the most useful features are the current activity
+and the time of day, followed by earlier lags.</li>
+<li><b>What works:</b> routine transitions are predicted well (Enter_Home F1 1.00; Read, Eat_Breakfast, Sleep
+and Wake_Up F1 ≥ 0.82), and accuracy is highest in the structured morning (72% at 06–09h).</li>
+<li><b>What fails:</b> most errors involve short "filler" activities that can follow almost anything
+(Toilet, Phone, Drink, Personal_Hygiene) and the heterogeneous <i>Rare</i> class.</li>
+</ul>
+
+<h2>4. Conclusion</h2>
+<p>The pipeline runs end to end: raw sensor text, then label expansion, episodes, leakage-free temporal
+features, and chronological evaluation. The resulting model predicts the next activity with 46% top-1 and
+69% top-3 accuracy among 26 classes. Its limitations are a single home and only 60 labelled days.
+Possible extensions are sequence models (GRU/Transformer) over episodes, semi-supervised use of the
+10 unlabelled months, and predicting <i>when</i> the next activity will start.</p>
+</body></html>
